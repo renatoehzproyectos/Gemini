@@ -116,6 +116,10 @@ export default function Home() {
             const activity: Activity = { kind: ev.kind === "command" ? "command" : ev.kind === "activity" ? "activity" : "step", label: ev.label || ev.type || "Agent step", type: ev.type, detail: ev.detail };
             setStatus(ev.detail?.command ? `Running: ${ev.detail.command.slice(0, 90)}` : (ev.label || "Working…"));
             updateLast(chat.id, m => ({ ...m, steps: [...(m.steps || []), ev.label || ev.type || "Agent step"], activities: [...(m.activities || []), activity] }));
+            if (mentionsOutputPath(ev.detail?.output) || mentionsOutputPath(ev.detail?.command) || mentionsOutputPath(ev.detail?.text) || mentionsOutputPath(ev.detail?.raw)) {
+              const env = chat.envId;
+              if (env) { startOutputPolling(env, modelMsg.id); void loadOutputFiles(env, modelMsg.id, true); }
+            }
             if (ev.detail?.output) {
               const parsed = parseChanges(ev.detail.output);
               if (parsed.length) updateLast(chat.id, m => ({ ...m, changes: mergeChanges(m.changes || [], parsed) }));
@@ -186,7 +190,12 @@ export default function Home() {
               if (state.outputText) updateLast(chat.id, m => m.text ? m : ({ ...m, text: state.outputText }));
               if (state.status === "incomplete") { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Paused — send Continue to resume"); }
               else if (state.status === "in_progress") { updateLast(chat.id, m => ({ ...m, status: "running" })); setStatus("Agent is still running in background"); }
-              else if (state.status === "completed") { void loadOutputFiles(state.environmentId || chat.envId, modelMsg.id); updateLast(chat.id, m => ({ ...m, status: "completed" })); setStatus("Ready"); }
+              else if (state.status === "completed") {
+                const env = state.environmentId || chat.envId;
+                updateLast(chat.id, m => ({ ...m, status: "completed" }));
+                if (env) { startOutputPolling(env, modelMsg.id); await waitForOutputs(env, modelMsg.id, 12); }
+                setStatus("Ready");
+              }
               else { updateLast(chat.id, m => ({ ...m, status: "error", text: m.text + (state.error ? `\n\nError: ${state.error}` : "\n\nConnection lost") })); setStatus("Error"); }
             } else { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Connection lost — send Continue to reconnect"); }
           } catch { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Connection lost — send Continue to reconnect"); }
@@ -195,13 +204,22 @@ export default function Home() {
         }
       }
     } finally {
-      Object.values(outputPollRef.current).forEach(clearInterval); outputPollRef.current = {};
+      // Keep output discovery alive briefly after the interaction finishes so files
+      // written by the sandbox are visible without any manual refresh.
+      const pollers = outputPollRef.current;
+      setTimeout(() => {
+        Object.keys(pollers).forEach(key => { clearInterval(pollers[key]); delete pollers[key]; });
+      }, 15000);
       setBusy(false); abortRef.current = null;
     }
   }
 
   function updateLast(chatId: string, fn: (m: Msg) => Msg) { setChats(c => c.map(ch => ch.id === chatId ? { ...ch, messages: ch.messages.map((m, i, a) => i === a.length - 1 ? fn(m) : m), updated: Date.now() } : ch)); }
   function addFiles(list: FileList | File[]) { const incoming = Array.from(list); setFiles(prev => [...prev, ...incoming].slice(0, 20)); }
+  function mentionsOutputPath(value?: string) {
+    return typeof value === "string" && /\/workspace\/outputs\//.test(value);
+  }
+
   async function loadOutputFiles(envId: string, messageId: string, silent = false) {
     if (!envId) return;
     if (!silent) setLoadingOutputs(v => ({ ...v, [messageId]: true }));
@@ -222,11 +240,34 @@ export default function Home() {
   }
 
   function startOutputPolling(envId: string, messageId: string) {
-    if (!envId || outputPollRef.current[messageId]) return;
+    if (!envId) return;
+    if (outputPollRef.current[messageId]) return;
     void loadOutputFiles(envId, messageId, true);
     outputPollRef.current[messageId] = setInterval(() => {
       void loadOutputFiles(envId, messageId, true);
-    }, 1500);
+    }, 1200);
+  }
+
+  async function waitForOutputs(envId: string, messageId: string, attempts = 12) {
+    if (!envId) return;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await fetch(`/api/environment/files?environmentId=${encodeURIComponent(envId)}&path=workspace/outputs&recursive=true`, {
+          headers: { "x-gemini-api-key": apiKey }, cache: "no-store"
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const found = (data.files || []).filter((f: OutputFile) => f.type === "file").map((f: OutputFile) => ({
+            ...f, name: cleanOutputName(f.name || f.path), mime_type: f.mime_type || mimeFromName(f.name || f.path)
+          }));
+          if (found.length) {
+            setOutputFiles(v => ({ ...v, [messageId]: found }));
+            return;
+          }
+        }
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   }
   async function downloadOutput(envId: string, file: OutputFile) {
     try {
@@ -267,10 +308,11 @@ export default function Home() {
             </div>)}</details> : null}
             {m.role === "model" && m.changes?.length ? <details className="changes" open><summary>Changes · {m.changes.length} files</summary>{m.changes.map((c,i) => <div className="changeRow" key={`${c.file}-${i}`}><span className="changeFile" title={c.file}>{c.file}</span><span className="changeAdd">+{c.additions}</span><span className="changeDel">-{c.deletions}</span></div>)}</details> : null}
             <div className="messageText">{m.text ? <MarkdownText text={m.text} /> : (m.status === "running" ? <span className="typing">● ● ●</span> : "")}</div>
-            {m.role === "model" && active.envId && (m.status === "completed" || m.status === "incomplete" || m.status === "running") && outputFiles[m.id]?.length ? <div className="outputs">
+            {m.role === "model" && outputFiles[m.id]?.length ? <div className="outputs">
+              <div className="outputsTitle">Output</div>
               <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}>
                 <div className="outputMeta"><span className="outputName" title={f.path}>{f.name}</span><span className="outputType">{fileTypeLabel(f)}</span></div>
-                <button className="downloadOutput" onClick={() => downloadOutput(active.envId, f)}>Download</button>
+                <button className="downloadOutput" onClick={() => downloadOutput(active.envId || "", f)}>Download</button>
               </div>)}</div>
             </div> : null}
           </div>
