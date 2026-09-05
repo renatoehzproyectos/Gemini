@@ -19,3 +19,20 @@
 
 /* Claude-style generated file cards */
 .outputs{margin-top:14px}.outputBtn{font-size:12px}.outputLoading{font-size:12px;color:#858b93;padding:8px 2px}.outputList{gap:7px}.outputFile{min-height:58px;padding:9px 10px;border:1px solid #e1e2e5;border-radius:11px;background:#fff}.outputMeta{min-width:0;display:flex;align-items:center;gap:10px;flex:1}.outputName{font-size:13px;font-weight:650;color:#25292e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.outputType{flex:none;font-size:10px;font-weight:650;color:#737a83;background:#f1f1f2;border:1px solid #e3e3e5;border-radius:6px;padding:4px 7px;text-transform:none}.downloadOutput{flex:none;border:1px solid #d8d9dc;background:#fff;color:#25292e;border-radius:8px;padding:7px 11px;font-size:12px;font-weight:650;cursor:pointer}.downloadOutput:hover{background:#f4f4f5}.downloadOutput:active{transform:translateY(1px)}
+
+/* Claude-style agent activity and file changes */
+.steps{background:#fafafa}
+.activityRow{display:flex!important;align-items:flex-start;gap:9px;padding:7px 11px!important;border-top:1px solid #ededee}
+.activityIcon{width:22px;flex:none;color:#6d737b;font-family:ui-monospace,monospace;text-align:center}
+.activityMain{min-width:0;flex:1}
+.activityTitle{font-size:11px;font-weight:650;color:#454b53}
+.activityFile{font-weight:500;color:#8a9097}
+.activityCommand{display:block;margin-top:5px;padding:7px 9px;border-radius:7px;background:#f0f0f1;color:#353a40;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.activityOutput{margin:5px 0 1px;padding:7px 9px;max-height:180px;overflow:auto;border-radius:7px;background:#f3f3f4;color:#626871;white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.changes{border:1px solid #e5e5e7;border-radius:10px;margin:7px 0 13px;overflow:hidden;background:#fff}
+.changes summary{cursor:pointer;padding:8px 10px;font-size:11px;font-weight:650;list-style:none;color:#626971}
+.changes summary::-webkit-details-marker{display:none}
+.changeRow{display:flex;align-items:center;gap:9px;border-top:1px solid #ededee;padding:7px 10px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.changeFile{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#424850}
+.changeAdd{color:#18794e;font-weight:700}
+.changeDel{color:#b42318;font-weight:700}

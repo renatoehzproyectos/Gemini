@@ -2,7 +2,9 @@
 
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
-type Msg = { id: string; role: "user" | "model"; text: string; files?: string[]; thoughts?: string[]; steps?: string[]; status?: string; time: number };
+type Activity = { kind: "command" | "activity" | "step"; label: string; type?: string; detail?: { command?: string; output?: string; file?: string; text?: string; raw?: string } };
+type Change = { file: string; additions: number; deletions: number };
+type Msg = { id: string; role: "user" | "model"; text: string; files?: string[]; thoughts?: string[]; steps?: string[]; activities?: Activity[]; changes?: Change[]; status?: string; time: number };
 type Chat = { id: string; title: string; messages: Msg[]; envId: string; prevId: string; updated: number };
 type Upload = { name: string; mimeType: string; data: string };
 type OutputFile = { path: string; name: string; mime_type?: string; size_bytes?: string; type?: string };
@@ -99,7 +101,15 @@ export default function Home() {
           if (ev.kind === "meta") { interactionRef.current = ev.interactionId || ""; updateChat(chat.id, { prevId: ev.interactionId || chat.prevId, envId: ev.environmentId || chat.envId }); }
           if (ev.kind === "text") updateLast(chat.id, m => ({ ...m, text: m.text + (ev.text || ""), status: "running" }));
           if (ev.kind === "thought") updateLast(chat.id, m => ({ ...m, thoughts: [...(m.thoughts || []), ev.text || ""] }));
-          if (ev.kind === "step") { setStatus(ev.label || "Working…"); updateLast(chat.id, m => ({ ...m, steps: [...(m.steps || []), ev.label || ev.type || "Agent step"] })); }
+          if (ev.kind === "step" || ev.kind === "command" || ev.kind === "activity") {
+            const activity: Activity = { kind: ev.kind === "command" ? "command" : ev.kind === "activity" ? "activity" : "step", label: ev.label || ev.type || "Agent step", type: ev.type, detail: ev.detail };
+            setStatus(ev.detail?.command ? `Running: ${ev.detail.command.slice(0, 90)}` : (ev.label || "Working…"));
+            updateLast(chat.id, m => ({ ...m, steps: [...(m.steps || []), ev.label || ev.type || "Agent step"], activities: [...(m.activities || []), activity] }));
+            if (ev.detail?.output) {
+              const parsed = parseChanges(ev.detail.output);
+              if (parsed.length) updateLast(chat.id, m => ({ ...m, changes: mergeChanges(m.changes || [], parsed) }));
+            }
+          }
           if (ev.kind === "status") { if (ev.interactionId) interactionRef.current = ev.interactionId; setStatus(ev.status || "Working…"); updateLast(chat.id, m => ({ ...m, status: ev.status || "completed" })); if (ev.environmentId || ev.interactionId) updateChat(chat.id, { envId: ev.environmentId || chat.envId, prevId: ev.interactionId || chat.prevId }); }
           if (ev.kind === "error") updateLast(chat.id, m => ({ ...m, text: (m.text ? m.text + "\n\n" : "") + "Error: " + ev.message, status: "error" }));
         }
@@ -216,10 +226,16 @@ export default function Home() {
           <div className="msgBody"><div className="msgHeader"><strong>{m.role === "user" ? "You" : "Gemini"}</strong>{m.status === "running" && <span className="live">Working</span>}</div>
             {m.files?.length ? <div className="chips">{m.files.map(f => <span className="chip" key={f}>📎 {f}</span>)}</div> : null}
             {m.role === "model" && m.thoughts?.length && showThinking ? <details className="thinking" open><summary>✦ Thinking summary</summary><div>{m.thoughts.join("\n")}</div></details> : null}
-            {m.role === "model" && m.steps?.length ? <details className="steps"><summary>Tools & activity · {m.steps.length}</summary>{m.steps.map((s,i) => <div key={i}>✓ {s}</div>)}</details> : null}
+            {m.role === "model" && m.activities?.length ? <details className="steps" open><summary>Tools & activity · {m.activities.length}</summary>{m.activities.map((a,i) => <div className="activityRow" key={i}>
+              <span className="activityIcon">{a.kind === "command" ? "›_" : a.kind === "activity" ? "↳" : "✓"}</span>
+              <div className="activityMain"><div className="activityTitle">{a.label}{a.detail?.file ? <span className="activityFile"> · {a.detail.file}</span> : null}</div>
+              {a.detail?.command ? <code className="activityCommand">$ {a.detail.command}</code> : null}
+              {a.detail?.output ? <pre className="activityOutput">{a.detail.output}</pre> : null}</div>
+            </div>)}</details> : null}
+            {m.role === "model" && m.changes?.length ? <details className="changes" open><summary>Changes · {m.changes.length} files</summary>{m.changes.map((c,i) => <div className="changeRow" key={`${c.file}-${i}`}><span className="changeFile" title={c.file}>{c.file}</span><span className="changeAdd">+{c.additions}</span><span className="changeDel">-{c.deletions}</span></div>)}</details> : null}
             <div className="messageText">{m.text ? <MarkdownText text={m.text} /> : (m.status === "running" ? <span className="typing">● ● ●</span> : "")}</div>
             {m.role === "model" && active.envId && (m.status === "completed" || m.status === "incomplete") ? <div className="outputs">
-              {!outputFiles[m.id]?.length && !loadingOutputs[m.id] ? <button className="outputBtn" onClick={() => loadOutputFiles(active.envId, m.id)} disabled={loadingOutputs[m.id]}>Show output files</button> : null}
+              {!outputFiles[m.id]?.length && !loadingOutputs[m.id] ? <button className="outputBtn" onClick={() => loadOutputFiles(active.envId, m.id)} disabled={loadingOutputs[m.id]}>Refresh outputs</button> : null}
               {loadingOutputs[m.id] ? <div className="outputLoading">Checking generated files…</div> : null}
               {outputFiles[m.id]?.length ? <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}>
                 <div className="outputMeta"><span className="outputName" title={f.path}>{f.name}</span><span className="outputType">{fileTypeLabel(f)}</span></div>
@@ -307,6 +323,23 @@ function fileTypeLabel(file: OutputFile) {
   const ext = (file.name || file.path).split(".").pop()?.toUpperCase();
   const labels: Record<string,string> = { "application/zip":"ZIP", "application/pdf":"PDF", "application/json":"JSON", "text/markdown":"Markdown", "text/plain":"Text", "text/javascript":"JavaScript", "text/typescript":"TypeScript", "text/html":"HTML", "text/css":"CSS", "image/png":"PNG", "image/jpeg":"JPEG", "image/webp":"WebP", "image/svg+xml":"SVG", "text/csv":"CSV" };
   return labels[mime] || (ext ? `${ext} file` : "File");
+}
+
+function parseChanges(output: string): Change[] {
+  const result: Change[] = [];
+  const lines = output.replace(/\\r/g, "").split("\n");
+  for (const line of lines) {
+    const m = line.match(/^\\s*(\\d+)\\s+(\\d+)\\s+(.+?)\\s*$/);
+    if (m && !/^\\d+\\s+\\d+\\s+\\d+$/.test(line.trim())) result.push({ file: m[3], additions: Number(m[1]), deletions: Number(m[2]) });
+    const marker = line.match(/GEMINI_CHANGE\\|(.+?)\\|\\+(\\d+)\\|\\-(\\d+)/);
+    if (marker) result.push({ file: marker[1], additions: Number(marker[2]), deletions: Number(marker[3]) });
+  }
+  return result;
+}
+function mergeChanges(existing: Change[], incoming: Change[]) {
+  const map = new Map(existing.map(x => [x.file, x]));
+  for (const x of incoming) map.set(x.file, { file: x.file, additions: x.additions, deletions: x.deletions });
+  return [...map.values()];
 }
 
 function fileToBase64(file: File) { return new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(",")[1] || ""); r.onerror = reject; r.readAsDataURL(file); }); }

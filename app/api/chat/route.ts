@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     const extra = String(body.systemPrompt || "").trim();
     const ai = new GoogleGenAI({ apiKey });
 
-    const systemInstruction = `You are Gemini Agent, a highly capable autonomous general-purpose coding and computer-use agent.\n\nWORKSPACE: /workspace/project. You have a managed Linux sandbox. Use the available filesystem and code execution tools directly. You can read, create, edit, rename, move, delete and search files; execute Bash/Python/Node commands; install packages; run tests, linters and builds; inspect command output; and browse the public web with Google Search and URL context.\n\nBEHAVIOR:\n- Inspect the workspace before changing it.\n- When asked to modify something, actually modify the files; do not merely provide a hypothetical patch.\n- Use tools iteratively: inspect -> plan -> change -> verify -> fix failures -> summarize.\n- Preserve existing architecture and user changes unless the task requires otherwise.\n- For destructive operations, be cautious; if the user explicitly requested them, perform them.\n- Never expose secrets, API keys or credentials in output or source files.\n- Prefer robust production-quality implementations over toy examples.\n- If tests/builds are relevant, run them and fix failures when practical.\n- For web/current-information tasks, use the web tools rather than guessing.\n- At the end, report what you actually changed and what you actually verified.\n- When you create a deliverable intended for the user to download (ZIP, PDF, image, source file, report, document, dataset, etc.), save or copy the final deliverable into /workspace/outputs/ with a clear filename and extension.\n${extra ? `\nADDITIONAL USER INSTRUCTIONS:\n${extra}` : ""}`;
+    const systemInstruction = `You are Gemini Agent, a highly capable autonomous general-purpose coding and computer-use agent.\n\nWORKSPACE: /workspace/project. You have a managed Linux sandbox. Use the available filesystem and code execution tools directly. You can read, create, edit, rename, move, delete and search files; execute Bash/Python/Node commands; install packages; run tests, linters and builds; inspect command output; and browse the public web with Google Search and URL context.\n\nBEHAVIOR:\n- Inspect the workspace before changing it.\n- When asked to modify something, actually modify the files; do not merely provide a hypothetical patch.\n- Use tools iteratively: inspect -> plan -> change -> verify -> fix failures -> summarize.\n- Preserve existing architecture and user changes unless the task requires otherwise.\n- For destructive operations, be cautious; if the user explicitly requested them, perform them.\n- Never expose secrets, API keys or credentials in output or source files.\n- Prefer robust production-quality implementations over toy examples.\n- If tests/builds are relevant, run them and fix failures when practical.\n- For web/current-information tasks, use the web tools rather than guessing.\n- At the end, report what you actually changed and what you actually verified.\n- Before making edits, inspect the relevant files and, when the project is a git repository, run git status --short.\n- After edits, run git diff --numstat and git status --short when practical. The UI uses the command/tool activity and these results to show file names with insertion/deletion counts.\n- When you create a deliverable intended for the user to download (ZIP, PDF, image, source file, report, document, dataset, etc.), save or copy the final deliverable into /workspace/outputs/ with a clear filename and extension. Use ordinary terminal commands such as: mkdir -p /workspace/outputs && cp "FINAL_FILE" "/workspace/outputs/FINAL_FILE". This is a real filesystem operation, not a simulated response. Always verify the copied file exists with ls -lh /workspace/outputs/FINAL_FILE.\n- The web app automatically detects files inside /workspace/outputs and renders them as downloadable output cards after the interaction. You do NOT need to call a special app function for this.\n- When you execute a terminal command, do it through your available code-execution tool; do not merely print a command that you did not execute.\n${extra ? `\nADDITIONAL USER INSTRUCTIONS:\n${extra}` : ""}`;
 
     const sources = await buildSources(files);
     const environment: any = environmentId
@@ -55,15 +55,29 @@ export async function POST(req: NextRequest) {
         try {
           for await (const event of interaction as any) {
             const e: any = event;
-            if (e?.event_type === "interaction.created") send(controller, { kind: "meta", interactionId: e.interaction?.id, environmentId: e.interaction?.environment_id });
-            else if (e?.event_type === "step.start") send(controller, { kind: "step", type: e.step?.type, label: labelForStep(e.step?.type) });
-            else if (e?.event_type === "step.delta") {
-              const d = e.delta;
+            if (e?.event_type === "interaction.created") {
+              send(controller, { kind: "meta", interactionId: e.interaction?.id, environmentId: e.interaction?.environment_id });
+            } else if (e?.event_type === "step.start") {
+              send(controller, { kind: "step", type: e.step?.type, label: labelForStep(e.step?.type), detail: extractActivityDetail(e.step) });
+            } else if (e?.event_type === "step.delta") {
+              const d = e.delta || {};
               if (d?.type === "text") send(controller, { kind: "text", text: d.text || "" });
               else if (d?.type === "thought_summary") send(controller, { kind: "thought", text: d.content?.text || "" });
-              else if (d?.type === "arguments_delta") send(controller, { kind: "step", type: "function_call", label: "Preparing tool call…" });
-            } else if (e?.event_type === "interaction.status_update") send(controller, { kind: "status", status: e.status || e.interaction?.status || "Working" });
-            else if (e?.event_type === "interaction.completed" || e?.event_type === "interaction.failed" || e?.event_type === "interaction.incomplete" || e?.event_type === "interaction.cancelled") send(controller, { kind: "status", status: e.interaction?.status || e.status || "completed", interactionId: e.interaction?.id, environmentId: e.interaction?.environment_id });
+              else {
+                const detail = extractActivityDetail(d);
+                if (d?.type === "arguments_delta" || d?.type === "tool_call" || d?.type === "function_call" || detail.command) {
+                  send(controller, { kind: "command", type: d?.type || "tool", label: "Running tool", detail });
+                } else if (detail.output || d?.type?.includes("result") || d?.type === "code_execution") {
+                  send(controller, { kind: "activity", type: d?.type || "tool_result", label: "Tool result", detail });
+                } else {
+                  send(controller, { kind: "step", type: d?.type, label: labelForStep(d?.type), detail });
+                }
+              }
+            } else if (e?.event_type === "interaction.status_update") {
+              send(controller, { kind: "status", status: e.status || e.interaction?.status || "Working" });
+            } else if (e?.event_type === "interaction.completed" || e?.event_type === "interaction.failed" || e?.event_type === "interaction.incomplete" || e?.event_type === "interaction.cancelled") {
+              send(controller, { kind: "status", status: e.interaction?.status || e.status || "completed", interactionId: e.interaction?.id, environmentId: e.interaction?.environment_id });
+            }
           }
           controller.close();
         } catch (err: any) { send(controller, { kind: "error", message: err?.message || String(err) }); controller.close(); }
@@ -71,6 +85,32 @@ export async function POST(req: NextRequest) {
     });
     return new Response(readable, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" } });
   } catch (err: any) { return new Response(err?.message || "Agent request failed", { status: 500 }); }
+}
+
+function extractActivityDetail(value: any): { command?: string; output?: string; file?: string; text?: string; raw?: string } {
+  const out: any = {};
+  const seen = new Set<any>();
+  const visit = (v: any, key = "") => {
+    if (v == null || seen.has(v)) return;
+    if (typeof v === "string") {
+      if (v.length > 12000) return;
+      if (/^(command|cmd|shell|command_line|executable)$/i.test(key) && !out.command) out.command = v;
+      else if (/^(output|stdout|stderr|result|content|text)$/i.test(key) && !out.output && v.trim()) out.output = v;
+      else if (!out.text && v.trim().length < 4000) out.text = v;
+      return;
+    }
+    if (typeof v !== "object") return;
+    seen.add(v);
+    for (const [k, x] of Object.entries(v)) visit(x, k);
+  };
+  visit(value);
+  const json = JSON.stringify(value);
+  const cmdMatch = json.match(/"(?:command|cmd|command_line|shell)"\s*:\s*"((?:\\.|[^"])*)"/i);
+  if (!out.command && cmdMatch) { try { out.command = JSON.parse('"' + cmdMatch[1] + '"'); } catch {} }
+  const fileMatch = json.match(/"(?:path|file|target)"\s*:\s*"((?:\\.|[^"])*)"/i);
+  if (fileMatch) { try { out.file = JSON.parse('"' + fileMatch[1] + '"'); } catch {} }
+  if (!out.raw && json.length < 14000 && !out.command && !out.output && !out.text) out.raw = json;
+  return out;
 }
 
 function labelForStep(type: string) {
