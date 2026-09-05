@@ -252,9 +252,13 @@ export default function Home() {
     if (!envId) return;
     if (outputPollRef.current[messageId]) return;
     void loadOutputFiles(envId, messageId, true);
+    // Each poll now downloads and parses the FULL environment tar snapshot
+    // (that's the only file-access mechanism Google's API actually exposes —
+    // see lib/environmentTar.ts), so this interval is deliberately much
+    // longer than a plain "list files" call would need to be.
     outputPollRef.current[messageId] = setInterval(() => {
       void loadOutputFiles(envId, messageId, true);
-    }, 1200);
+    }, 4000);
   }
 
   async function waitForOutputs(envId: string, messageId: string, attempts = 12) {
