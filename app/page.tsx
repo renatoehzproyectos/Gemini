@@ -25,12 +25,10 @@ export default function Home() {
   const [settings, setSettings] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [showThinking, setShowThinking] = useState(true);
-  const [background, setBackground] = useState(false);
+  const [background, setBackground] = useState(true);
   const [autoRun, setAutoRun] = useState(true);
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [repositoryUrl, setRepositoryUrl] = useState("");
-  const [repositoryTarget, setRepositoryTarget] = useState("/workspace/project");
-  const [maxTokens, setMaxTokens] = useState(50000);
+  const [maxTokens, setMaxTokens] = useState(250000);
   const [drag, setDrag] = useState(false);
   const [sidebar, setSidebar] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -46,12 +44,12 @@ export default function Home() {
       const savedSettings = localStorage.getItem("gemini-max-settings");
       if (savedKey) setApiKey(savedKey);
       if (saved) { const parsed = JSON.parse(saved) as Chat[]; if (parsed.length) { setChats(parsed); setActiveId(parsed[0].id); } }
-      if (savedSettings) { const s = JSON.parse(savedSettings); setModel(s.model || "gemini-3.7-flash"); setShowThinking(s.showThinking !== false); setBackground(!!s.background); setAutoRun(s.autoRun !== false); setSystemPrompt(s.systemPrompt || ""); setRepositoryUrl(s.repositoryUrl || ""); setRepositoryTarget(s.repositoryTarget || "/workspace/project"); setMaxTokens(Number(s.maxTokens) || 50000); }
+      if (savedSettings) { const s = JSON.parse(savedSettings); setModel(s.model || "gemini-3.7-flash"); setShowThinking(s.showThinking !== false); setBackground(!!s.background); setAutoRun(s.autoRun !== false); setSystemPrompt(s.systemPrompt || ""); setMaxTokens(Number(s.maxTokens) || 250000); }
     } catch {}
   }, []);
 
   useEffect(() => { if (apiKey) localStorage.setItem("gemini-max-api-key", apiKey); }, [apiKey]);
-  useEffect(() => { localStorage.setItem("gemini-max-settings", JSON.stringify({ model, showThinking, background, autoRun, systemPrompt, repositoryUrl, repositoryTarget, maxTokens })); }, [model, showThinking, background, autoRun, systemPrompt, repositoryUrl, repositoryTarget, maxTokens]);
+  useEffect(() => { localStorage.setItem("gemini-max-settings", JSON.stringify({ model, showThinking, background, autoRun, systemPrompt, maxTokens })); }, [model, showThinking, background, autoRun, systemPrompt, maxTokens]);
   useEffect(() => { if (chats.length) localStorage.setItem("gemini-max-chats", JSON.stringify(chats)); else localStorage.removeItem("gemini-max-chats"); }, [chats]);
 
   function createChat() {
@@ -67,12 +65,7 @@ export default function Home() {
   async function send() {
     if (!prompt.trim() || !apiKey.trim() || busy) return;
     let chat = active;
-    if (!chat) {
-      const id = crypto.randomUUID();
-      chat = { id, title: "New conversation", messages: [], envId: "", prevId: "", updated: Date.now() };
-      setChats(c => [chat!, ...c]);
-      setActiveId(id);
-    }
+    if (!chat) { createChat(); return; }
     setBusy(true); setStatus(background ? "Running in background…" : "Thinking…");
     const uploaded: Upload[] = await Promise.all(files.map(async f => ({ name: f.name, mimeType: f.type || "application/octet-stream", data: await fileToBase64(f) })));
     const text = prompt.trim();
@@ -84,7 +77,7 @@ export default function Home() {
     const controller = new AbortController(); abortRef.current = controller;
     try {
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", "x-gemini-api-key": apiKey }, signal: controller.signal,
-        body: JSON.stringify({ model, prompt: text, files: uploaded, repositoryUrl, repositoryTarget, environmentId: chat.envId || undefined, previousInteractionId: chat.prevId || undefined, maxTokens, background, systemPrompt, thinkingSummaries: showThinking, autoRun }) });
+        body: JSON.stringify({ model, prompt: text, files: uploaded, environmentId: chat.envId || undefined, previousInteractionId: chat.prevId || undefined, maxTokens, background: true, autoRun, systemPrompt, thinkingSummaries: showThinking }) });
       if (!res.ok) throw new Error(await res.text());
       const reader = res.body?.getReader(); if (!reader) throw new Error("No response stream");
       const decoder = new TextDecoder(); let buffer = "";
@@ -103,9 +96,64 @@ export default function Home() {
           if (ev.kind === "error") updateLast(chat.id, m => ({ ...m, text: (m.text ? m.text + "\n\n" : "") + "Error: " + ev.message, status: "error" }));
         }
       }
-      setStatus("Ready");
+      // A long agent run may end the SSE connection before the server finishes.
+      // Recover the authoritative state from the stored Interaction instead of treating
+      // a closed stream as a failure.
+      const id = interactionRef.current;
+      if (id) {
+        let finalState: any = null;
+        for (let attempt = 0; attempt < 90; attempt++) {
+          try {
+            const r = await fetch(`/api/interaction/status?id=${encodeURIComponent(id)}`, { headers: { "x-gemini-api-key": apiKey } });
+            if (r.ok) {
+              finalState = await r.json();
+              if (["completed", "failed", "cancelled", "incomplete"].includes(finalState.status)) break;
+            }
+          } catch {}
+          await new Promise(resolve => setTimeout(resolve, 4000));
+        }
+        if (finalState) {
+          if (finalState.environmentId || finalState.id) updateChat(chat.id, { envId: finalState.environmentId || chat.envId, prevId: finalState.id || chat.prevId });
+          if (finalState.outputText) updateLast(chat.id, m => m.text ? m : ({ ...m, text: finalState.outputText }));
+          if (finalState.status === "incomplete") {
+            updateLast(chat.id, m => ({ ...m, status: "incomplete" }));
+            setStatus("Paused — send Continue to resume");
+          } else if (finalState.status === "failed") {
+            updateLast(chat.id, m => ({ ...m, status: "error", text: m.text + (finalState.error ? `\n\nError: ${finalState.error}` : "") }));
+            setStatus("Failed");
+          } else if (finalState.status === "cancelled") {
+            updateLast(chat.id, m => ({ ...m, status: "cancelled" }));
+            setStatus("Cancelled");
+          } else {
+            updateLast(chat.id, m => ({ ...m, status: "completed" }));
+            setStatus("Ready");
+          }
+        } else {
+          updateLast(chat.id, m => ({ ...m, status: "incomplete" }));
+          setStatus("Connection lost — send Continue to reconnect");
+        }
+      } else setStatus("Ready");
     } catch (e: any) {
-      if (e?.name !== "AbortError") { updateLast(chat.id, m => ({ ...m, text: (m.text ? m.text + "\n\n" : "") + "Error: " + (e?.message || String(e)), status: "error" })); setStatus("Error"); }
+      if (e?.name !== "AbortError") {
+        const id = interactionRef.current;
+        if (id) {
+          setStatus("Reconnecting to agent…");
+          try {
+            const r = await fetch(`/api/interaction/status?id=${encodeURIComponent(id)}`, { headers: { "x-gemini-api-key": apiKey } });
+            const state: any = r.ok ? await r.json() : null;
+            if (state) {
+              if (state.environmentId || state.id) updateChat(chat.id, { envId: state.environmentId || chat.envId, prevId: state.id || chat.prevId });
+              if (state.outputText) updateLast(chat.id, m => m.text ? m : ({ ...m, text: state.outputText }));
+              if (state.status === "incomplete") { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Paused — send Continue to resume"); }
+              else if (state.status === "in_progress") { updateLast(chat.id, m => ({ ...m, status: "running" })); setStatus("Agent is still running in background"); }
+              else if (state.status === "completed") { updateLast(chat.id, m => ({ ...m, status: "completed" })); setStatus("Ready"); }
+              else { updateLast(chat.id, m => ({ ...m, status: "error", text: m.text + (state.error ? `\n\nError: ${state.error}` : "\n\nConnection lost") })); setStatus("Error"); }
+            } else { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Connection lost — send Continue to reconnect"); }
+          } catch { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Connection lost — send Continue to reconnect"); }
+        } else {
+          updateLast(chat.id, m => ({ ...m, text: (m.text ? m.text + "\n\n" : "") + "Error: " + (e?.message || String(e)), status: "error" })); setStatus("Error");
+        }
+      }
     } finally { setBusy(false); abortRef.current = null; }
   }
 
@@ -149,8 +197,6 @@ export default function Home() {
       <label>Agent model<select value={model} onChange={e => setModel(e.target.value)}>{MODELS.map(([v,l]) => <option value={v} key={v}>{l}</option>)}</select></label>
       <div className="settingGrid"><label className="toggle"><input type="checkbox" checked={showKey} onChange={e => setShowKey(e.target.checked)} /><span>Show API key</span></label><label className="toggle"><input type="checkbox" checked={showThinking} onChange={e => setShowThinking(e.target.checked)} /><span>Thinking summaries</span></label><label className="toggle"><input type="checkbox" checked={background} onChange={e => setBackground(e.target.checked)} /><span>Background tasks</span></label><label className="toggle"><input type="checkbox" checked={autoRun} onChange={e => setAutoRun(e.target.checked)} /><span>Auto test/build</span></label></div>
       <label>Maximum tokens<input type="number" min={1000} max={1000000} value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} /></label>
-      <label>Git repository URL<input value={repositoryUrl} onChange={e => setRepositoryUrl(e.target.value)} placeholder="https://github.com/owner/repo" /><small>Recommended for complete or large projects. Gemini mounts the repository directly into the persistent sandbox.</small></label>
-      <label>Repository target<input value={repositoryTarget} onChange={e => setRepositoryTarget(e.target.value)} placeholder="/workspace/project" /></label>
       <label>Additional agent instructions<textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)} placeholder="Optional instructions for how Gemini should work…" /></label>
       <div className="capabilities"><strong>Agent capabilities</strong><span>✓ Filesystem</span><span>✓ Bash / Python / Node</span><span>✓ Package installation</span><span>✓ Tests & builds</span><span>✓ Google Search</span><span>✓ URL context</span><span>✓ Persistent sandbox</span><span>✓ Background execution</span></div>
       <div className="settingsFoot"><button className="danger" onClick={() => { setApiKey(""); localStorage.removeItem("gemini-max-api-key"); }}>Remove saved key</button><button className="primary" onClick={() => setSettings(false)}>Done</button></div>
