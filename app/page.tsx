@@ -39,6 +39,7 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const interactionRef = useRef("");
+  const outputPollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   const active = useMemo(() => chats.find(c => c.id === activeId) || null, [chats, activeId]);
 
@@ -65,7 +66,9 @@ export default function Home() {
   function updateChat(id: string, patch: Partial<Chat>) { setChats(c => c.map(x => x.id === id ? { ...x, ...patch, updated: Date.now() } : x)); }
   function removeChat(id: string) { setChats(c => c.filter(x => x.id !== id)); if (id === activeId) { const next = chats.find(x => x.id !== id); setActiveId(next?.id || ""); } }
   function clearAll() { if (confirm("Delete all local conversation history?")) { setChats([]); setActiveId(""); } }
-  async function stop() { const id = interactionRef.current; abortRef.current?.abort(); if (id) { try { await fetch("/api/interaction/cancel", { method: "POST", headers: { "Content-Type": "application/json", "x-gemini-api-key": apiKey }, body: JSON.stringify({ id }) }); } catch {} } setBusy(false); setStatus("Stopped"); }
+  async function stop() {
+    Object.values(outputPollRef.current).forEach(clearInterval); outputPollRef.current = {};
+    const id = interactionRef.current; abortRef.current?.abort(); if (id) { try { await fetch("/api/interaction/cancel", { method: "POST", headers: { "Content-Type": "application/json", "x-gemini-api-key": apiKey }, body: JSON.stringify({ id }) }); } catch {} } setBusy(false); setStatus("Stopped"); }
 
   async function send() {
     if (!prompt.trim() || !apiKey.trim() || busy) return;
@@ -98,7 +101,15 @@ export default function Home() {
         for (const line of lines) {
           if (!line.startsWith("\u0000EVENT ")) continue;
           let ev: any; try { ev = JSON.parse(line.slice(7)); } catch { continue; }
-          if (ev.kind === "meta") { interactionRef.current = ev.interactionId || ""; updateChat(chat.id, { prevId: ev.interactionId || chat.prevId, envId: ev.environmentId || chat.envId }); }
+          if (ev.kind === "meta") {
+            interactionRef.current = ev.interactionId || "";
+            const env = ev.environmentId || chat.envId;
+            updateChat(chat.id, { prevId: ev.interactionId || chat.prevId, envId: env });
+            if (env) {
+              void loadOutputFiles(env, modelMsg.id);
+              startOutputPolling(env, modelMsg.id);
+            }
+          }
           if (ev.kind === "text") updateLast(chat.id, m => ({ ...m, text: m.text + (ev.text || ""), status: "running" }));
           if (ev.kind === "thought") updateLast(chat.id, m => ({ ...m, thoughts: [...(m.thoughts || []), ev.text || ""] }));
           if (ev.kind === "step" || ev.kind === "command" || ev.kind === "activity") {
@@ -110,7 +121,16 @@ export default function Home() {
               if (parsed.length) updateLast(chat.id, m => ({ ...m, changes: mergeChanges(m.changes || [], parsed) }));
             }
           }
-          if (ev.kind === "status") { if (ev.interactionId) interactionRef.current = ev.interactionId; setStatus(ev.status || "Working…"); updateLast(chat.id, m => ({ ...m, status: ev.status || "completed" })); if (ev.environmentId || ev.interactionId) updateChat(chat.id, { envId: ev.environmentId || chat.envId, prevId: ev.interactionId || chat.prevId }); }
+          if (ev.kind === "status") {
+            if (ev.interactionId) interactionRef.current = ev.interactionId;
+            setStatus(ev.status || "Working…");
+            updateLast(chat.id, m => ({ ...m, status: ev.status || "completed" }));
+            if (ev.environmentId || ev.interactionId) {
+              const env = ev.environmentId || chat.envId;
+              updateChat(chat.id, { envId: env, prevId: ev.interactionId || chat.prevId });
+              if (env) { void loadOutputFiles(env, modelMsg.id); startOutputPolling(env, modelMsg.id); }
+            }
+          }
           if (ev.kind === "error") updateLast(chat.id, m => ({ ...m, text: (m.text ? m.text + "\n\n" : "") + "Error: " + ev.message, status: "error" }));
         }
       }
@@ -174,26 +194,39 @@ export default function Home() {
           updateLast(chat.id, m => ({ ...m, text: (m.text ? m.text + "\n\n" : "") + "Error: " + (e?.message || String(e)), status: "error" })); setStatus("Error");
         }
       }
-    } finally { setBusy(false); abortRef.current = null; }
+    } finally {
+      Object.values(outputPollRef.current).forEach(clearInterval); outputPollRef.current = {};
+      setBusy(false); abortRef.current = null;
+    }
   }
 
   function updateLast(chatId: string, fn: (m: Msg) => Msg) { setChats(c => c.map(ch => ch.id === chatId ? { ...ch, messages: ch.messages.map((m, i, a) => i === a.length - 1 ? fn(m) : m), updated: Date.now() } : ch)); }
   function addFiles(list: FileList | File[]) { const incoming = Array.from(list); setFiles(prev => [...prev, ...incoming].slice(0, 20)); }
-  async function loadOutputFiles(envId: string, messageId: string) {
+  async function loadOutputFiles(envId: string, messageId: string, silent = false) {
     if (!envId) return;
-    setLoadingOutputs(v => ({ ...v, [messageId]: true }));
+    if (!silent) setLoadingOutputs(v => ({ ...v, [messageId]: true }));
     try {
-      const res = await fetch(`/api/environment/files?environmentId=${encodeURIComponent(envId)}&path=workspace/outputs&recursive=true`, { headers: { "x-gemini-api-key": apiKey } });
+      const res = await fetch(`/api/environment/files?environmentId=${encodeURIComponent(envId)}&path=workspace/outputs&recursive=true`, { headers: { "x-gemini-api-key": apiKey }, cache: "no-store" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       const files = (data.files || []).filter((f: OutputFile) => f.type === "file").map((f: OutputFile) => ({ ...f, name: cleanOutputName(f.name || f.path), mime_type: f.mime_type || mimeFromName(f.name || f.path) }));
       setOutputFiles(v => ({ ...v, [messageId]: files }));
     } catch (e: any) {
-      setOutputFiles(v => ({ ...v, [messageId]: [] }));
-      setStatus(`Could not load outputs: ${e?.message || "error"}`);
+      if (!silent) {
+        setOutputFiles(v => ({ ...v, [messageId]: [] }));
+        setStatus(`Could not load outputs: ${e?.message || "error"}`);
+      }
     } finally {
-      setLoadingOutputs(v => ({ ...v, [messageId]: false }));
+      if (!silent) setLoadingOutputs(v => ({ ...v, [messageId]: false }));
     }
+  }
+
+  function startOutputPolling(envId: string, messageId: string) {
+    if (!envId || outputPollRef.current[messageId]) return;
+    void loadOutputFiles(envId, messageId, true);
+    outputPollRef.current[messageId] = setInterval(() => {
+      void loadOutputFiles(envId, messageId, true);
+    }, 1500);
   }
   async function downloadOutput(envId: string, file: OutputFile) {
     try {
@@ -234,13 +267,11 @@ export default function Home() {
             </div>)}</details> : null}
             {m.role === "model" && m.changes?.length ? <details className="changes" open><summary>Changes · {m.changes.length} files</summary>{m.changes.map((c,i) => <div className="changeRow" key={`${c.file}-${i}`}><span className="changeFile" title={c.file}>{c.file}</span><span className="changeAdd">+{c.additions}</span><span className="changeDel">-{c.deletions}</span></div>)}</details> : null}
             <div className="messageText">{m.text ? <MarkdownText text={m.text} /> : (m.status === "running" ? <span className="typing">● ● ●</span> : "")}</div>
-            {m.role === "model" && active.envId && (m.status === "completed" || m.status === "incomplete") ? <div className="outputs">
-              {!outputFiles[m.id]?.length && !loadingOutputs[m.id] ? <button className="outputBtn" onClick={() => loadOutputFiles(active.envId, m.id)} disabled={loadingOutputs[m.id]}>Refresh outputs</button> : null}
-              {loadingOutputs[m.id] ? <div className="outputLoading">Checking generated files…</div> : null}
-              {outputFiles[m.id]?.length ? <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}>
+            {m.role === "model" && active.envId && (m.status === "completed" || m.status === "incomplete" || m.status === "running") && outputFiles[m.id]?.length ? <div className="outputs">
+              <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}>
                 <div className="outputMeta"><span className="outputName" title={f.path}>{f.name}</span><span className="outputType">{fileTypeLabel(f)}</span></div>
                 <button className="downloadOutput" onClick={() => downloadOutput(active.envId, f)}>Download</button>
-              </div>)}</div> : null}
+              </div>)}</div>
             </div> : null}
           </div>
         </article>)}</div>}
