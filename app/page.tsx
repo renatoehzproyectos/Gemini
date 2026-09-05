@@ -124,6 +124,7 @@ export default function Home() {
           if (finalState.environmentId || finalState.id) updateChat(chat.id, { envId: finalState.environmentId || chat.envId, prevId: finalState.id || chat.prevId });
           if (finalState.outputText) updateLast(chat.id, m => m.text ? m : ({ ...m, text: finalState.outputText }));
           if (finalState.status === "incomplete") {
+            void loadOutputFiles(finalState.environmentId || chat.envId, modelMsg.id);
             updateLast(chat.id, m => ({ ...m, status: "incomplete" }));
             setStatus("Paused — send Continue to resume");
           } else if (finalState.status === "failed") {
@@ -133,6 +134,7 @@ export default function Home() {
             updateLast(chat.id, m => ({ ...m, status: "cancelled" }));
             setStatus("Cancelled");
           } else {
+            void loadOutputFiles(finalState.environmentId || chat.envId, modelMsg.id);
             updateLast(chat.id, m => ({ ...m, status: "completed" }));
             setStatus("Ready");
           }
@@ -154,7 +156,7 @@ export default function Home() {
               if (state.outputText) updateLast(chat.id, m => m.text ? m : ({ ...m, text: state.outputText }));
               if (state.status === "incomplete") { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Paused — send Continue to resume"); }
               else if (state.status === "in_progress") { updateLast(chat.id, m => ({ ...m, status: "running" })); setStatus("Agent is still running in background"); }
-              else if (state.status === "completed") { updateLast(chat.id, m => ({ ...m, status: "completed" })); setStatus("Ready"); }
+              else if (state.status === "completed") { void loadOutputFiles(state.environmentId || chat.envId, modelMsg.id); updateLast(chat.id, m => ({ ...m, status: "completed" })); setStatus("Ready"); }
               else { updateLast(chat.id, m => ({ ...m, status: "error", text: m.text + (state.error ? `\n\nError: ${state.error}` : "\n\nConnection lost") })); setStatus("Error"); }
             } else { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Connection lost — send Continue to reconnect"); }
           } catch { updateLast(chat.id, m => ({ ...m, status: "incomplete" })); setStatus("Connection lost — send Continue to reconnect"); }
@@ -174,7 +176,7 @@ export default function Home() {
       const res = await fetch(`/api/environment/files?environmentId=${encodeURIComponent(envId)}&path=workspace/outputs&recursive=true`, { headers: { "x-gemini-api-key": apiKey } });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      const files = (data.files || []).filter((f: OutputFile) => f.type === "file");
+      const files = (data.files || []).filter((f: OutputFile) => f.type === "file").map((f: OutputFile) => ({ ...f, name: cleanOutputName(f.name || f.path), mime_type: f.mime_type || mimeFromName(f.name || f.path) }));
       setOutputFiles(v => ({ ...v, [messageId]: files }));
     } catch (e: any) {
       setOutputFiles(v => ({ ...v, [messageId]: [] }));
@@ -217,8 +219,12 @@ export default function Home() {
             {m.role === "model" && m.steps?.length ? <details className="steps"><summary>Tools & activity · {m.steps.length}</summary>{m.steps.map((s,i) => <div key={i}>✓ {s}</div>)}</details> : null}
             <div className="messageText">{m.text ? <MarkdownText text={m.text} /> : (m.status === "running" ? <span className="typing">● ● ●</span> : "")}</div>
             {m.role === "model" && active.envId && (m.status === "completed" || m.status === "incomplete") ? <div className="outputs">
-              <button className="outputBtn" onClick={() => loadOutputFiles(active.envId, m.id)} disabled={loadingOutputs[m.id]}>📦 {loadingOutputs[m.id] ? "Loading outputs…" : "Output files"}</button>
-              {outputFiles[m.id]?.length ? <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}><span title={f.path}>📄 {f.path.replace(/^workspace\/outputs\/?/, "")}</span><button onClick={() => downloadOutput(active.envId, f)}>Download</button></div>)}</div> : null}
+              {!outputFiles[m.id]?.length && !loadingOutputs[m.id] ? <button className="outputBtn" onClick={() => loadOutputFiles(active.envId, m.id)} disabled={loadingOutputs[m.id]}>Show output files</button> : null}
+              {loadingOutputs[m.id] ? <div className="outputLoading">Checking generated files…</div> : null}
+              {outputFiles[m.id]?.length ? <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}>
+                <div className="outputMeta"><span className="outputName" title={f.path}>{f.name}</span><span className="outputType">{fileTypeLabel(f)}</span></div>
+                <button className="downloadOutput" onClick={() => downloadOutput(active.envId, f)}>Download</button>
+              </div>)}</div> : null}
             </div> : null}
           </div>
         </article>)}</div>}
@@ -285,6 +291,22 @@ function inlineMarkdown(value: string): ReactNode[] {
     if (part.startsWith("_") && part.endsWith("_")) return <em key={i}>{part.slice(1,-1)}</em>;
     return <span key={i}>{part}</span>;
   });
+}
+
+function cleanOutputName(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.replace(/^.*\/workspace\/outputs\/?/i, "").replace(/^.*\/outputs\/?/i, "") || normalized.split("/").pop() || "download";
+}
+function mimeFromName(name: string) {
+  const ext = name.toLowerCase().split(".").pop() || "";
+  const map: Record<string,string> = { zip:"application/zip", pdf:"application/pdf", json:"application/json", txt:"text/plain", md:"text/markdown", html:"text/html", css:"text/css", js:"text/javascript", ts:"text/typescript", png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", webp:"image/webp", svg:"image/svg+xml", csv:"text/csv", mp3:"audio/mpeg", mp4:"video/mp4", webm:"video/webm", docx:"application/vnd.openxmlformats-officedocument.wordprocessingml.document", xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
+  return map[ext] || "application/octet-stream";
+}
+function fileTypeLabel(file: OutputFile) {
+  const mime = file.mime_type || mimeFromName(file.name || file.path);
+  const ext = (file.name || file.path).split(".").pop()?.toUpperCase();
+  const labels: Record<string,string> = { "application/zip":"ZIP", "application/pdf":"PDF", "application/json":"JSON", "text/markdown":"Markdown", "text/plain":"Text", "text/javascript":"JavaScript", "text/typescript":"TypeScript", "text/html":"HTML", "text/css":"CSS", "image/png":"PNG", "image/jpeg":"JPEG", "image/webp":"WebP", "image/svg+xml":"SVG", "text/csv":"CSV" };
+  return labels[mime] || (ext ? `${ext} file` : "File");
 }
 
 function fileToBase64(file: File) { return new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(",")[1] || ""); r.onerror = reject; r.readAsDataURL(file); }); }

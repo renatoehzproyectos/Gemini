@@ -16,3 +16,6 @@
 .outputFile{display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding:.45rem .6rem;border:1px solid var(--border);border-radius:9px;background:rgba(127,127,127,.05);font-size:13px}
 .outputFile span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .outputFile button{flex:none;border:1px solid var(--border);background:transparent;color:var(--text);border-radius:7px;padding:.3rem .55rem;cursor:pointer}
+
+/* Claude-style generated file cards */
+.outputs{margin-top:14px}.outputBtn{font-size:12px}.outputLoading{font-size:12px;color:#858b93;padding:8px 2px}.outputList{gap:7px}.outputFile{min-height:58px;padding:9px 10px;border:1px solid #e1e2e5;border-radius:11px;background:#fff}.outputMeta{min-width:0;display:flex;align-items:center;gap:10px;flex:1}.outputName{font-size:13px;font-weight:650;color:#25292e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.outputType{flex:none;font-size:10px;font-weight:650;color:#737a83;background:#f1f1f2;border:1px solid #e3e3e5;border-radius:6px;padding:4px 7px;text-transform:none}.downloadOutput{flex:none;border:1px solid #d8d9dc;background:#fff;color:#25292e;border-radius:8px;padding:7px 11px;font-size:12px;font-weight:650;cursor:pointer}.downloadOutput:hover{background:#f4f4f5}.downloadOutput:active{transform:translateY(1px)}
