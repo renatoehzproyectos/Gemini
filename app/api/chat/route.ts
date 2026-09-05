@@ -117,8 +117,8 @@ async function appendZip(input: any[], file: InputFile) {
 
   for (const name of names) {
     if (!TEXT_EXTENSIONS.test(name)) continue;
-    const size = zip.files[name]._data?.uncompressedSize ?? 0;
-    if (size > 2_000_000) continue;
+    const file = zip.files[name];
+    if (!file || file.dir) continue;
     const content = await zip.files[name].async("string");
     readable.push(`--- ${name} ---\n${content}\n--- END ${name} ---`);
   }
