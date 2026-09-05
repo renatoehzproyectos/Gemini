@@ -1,12 +1,11 @@
 {
-  "name": "gemini-terminal-ui",
-  "version": "1.0.0",
+  "name": "gemini-terminal-max",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "start": "next start"
   },
   "dependencies": {
     "@google/genai": "2.21.0",
