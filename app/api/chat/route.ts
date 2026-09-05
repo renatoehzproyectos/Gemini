@@ -22,7 +22,6 @@ export async function POST(req: NextRequest) {
     const environmentId = body.environmentId || undefined;
     const files: Uploaded[] = Array.isArray(body.files) ? body.files : [];
     const background = !!body.background;
-    const thinkingSummaries = body.thinkingSummaries !== false;
     const maxTokens = Math.max(1000, Math.min(Number(body.maxTokens) || 50000, 1000000));
     const extra = String(body.systemPrompt || "").trim();
     const ai = new GoogleGenAI({ apiKey });
@@ -42,7 +41,6 @@ export async function POST(req: NextRequest) {
       environment,
       previous_interaction_id: previousInteractionId,
       agent_config: { type: "antigravity", model, max_total_tokens: maxTokens },
-      generation_config: { thinking_summaries: thinkingSummaries ? "auto" : "none" },
       background,
       stream: true,
     } as any, { timeout: 300000 });
