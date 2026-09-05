@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type Msg = { id: string; role: "user" | "model"; text: string; files?: string[]; thoughts?: string[]; steps?: string[]; status?: string; time: number };
 type Chat = { id: string; title: string; messages: Msg[]; envId: string; prevId: string; updated: number };
 type Upload = { name: string; mimeType: string; data: string };
+type OutputFile = { path: string; name: string; mime_type?: string; size_bytes?: string; type?: string };
 
 const MODELS = [
   ["gemini-3.7-flash", "Gemini 3.7 Flash"],
@@ -31,6 +32,8 @@ export default function Home() {
   const [maxTokens, setMaxTokens] = useState(250000);
   const [drag, setDrag] = useState(false);
   const [sidebar, setSidebar] = useState(true);
+  const [outputFiles, setOutputFiles] = useState<Record<string, OutputFile[]>>({});
+  const [loadingOutputs, setLoadingOutputs] = useState<Record<string, boolean>>({});
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const interactionRef = useRef("");
@@ -65,7 +68,12 @@ export default function Home() {
   async function send() {
     if (!prompt.trim() || !apiKey.trim() || busy) return;
     let chat = active;
-    if (!chat) { createChat(); return; }
+    if (!chat) {
+      const id = crypto.randomUUID();
+      chat = { id, title: "New conversation", messages: [], envId: "", prevId: "", updated: Date.now() };
+      setChats(c => [chat!, ...c]);
+      setActiveId(id);
+    }
     setBusy(true); setStatus(background ? "Running in background…" : "Thinking…");
     const uploaded: Upload[] = await Promise.all(files.map(async f => ({ name: f.name, mimeType: f.type || "application/octet-stream", data: await fileToBase64(f) })));
     const text = prompt.trim();
@@ -159,6 +167,32 @@ export default function Home() {
 
   function updateLast(chatId: string, fn: (m: Msg) => Msg) { setChats(c => c.map(ch => ch.id === chatId ? { ...ch, messages: ch.messages.map((m, i, a) => i === a.length - 1 ? fn(m) : m), updated: Date.now() } : ch)); }
   function addFiles(list: FileList | File[]) { const incoming = Array.from(list); setFiles(prev => [...prev, ...incoming].slice(0, 20)); }
+  async function loadOutputFiles(envId: string, messageId: string) {
+    if (!envId) return;
+    setLoadingOutputs(v => ({ ...v, [messageId]: true }));
+    try {
+      const res = await fetch(`/api/environment/files?environmentId=${encodeURIComponent(envId)}&path=workspace/outputs&recursive=true`, { headers: { "x-gemini-api-key": apiKey } });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const files = (data.files || []).filter((f: OutputFile) => f.type === "file");
+      setOutputFiles(v => ({ ...v, [messageId]: files }));
+    } catch (e: any) {
+      setOutputFiles(v => ({ ...v, [messageId]: [] }));
+      setStatus(`Could not load outputs: ${e?.message || "error"}`);
+    } finally {
+      setLoadingOutputs(v => ({ ...v, [messageId]: false }));
+    }
+  }
+  async function downloadOutput(envId: string, file: OutputFile) {
+    try {
+      const res = await fetch(`/api/environment/file?environmentId=${encodeURIComponent(envId)}&path=${encodeURIComponent(file.path)}`, { headers: { "x-gemini-api-key": apiKey } });
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = file.name || file.path.split("/").pop() || "download"; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } catch (e: any) { setStatus(`Download failed: ${e?.message || "error"}`); }
+  }
   function exportChat() { if (!active) return; downloadBlob(JSON.stringify(active, null, 2), `${slug(active.title)}.json`, "application/json"); }
 
   return <div className="app">
@@ -181,7 +215,11 @@ export default function Home() {
             {m.files?.length ? <div className="chips">{m.files.map(f => <span className="chip" key={f}>📎 {f}</span>)}</div> : null}
             {m.role === "model" && m.thoughts?.length && showThinking ? <details className="thinking" open><summary>✦ Thinking summary</summary><div>{m.thoughts.join("\n")}</div></details> : null}
             {m.role === "model" && m.steps?.length ? <details className="steps"><summary>Tools & activity · {m.steps.length}</summary>{m.steps.map((s,i) => <div key={i}>✓ {s}</div>)}</details> : null}
-            <div className="messageText">{m.text || (m.status === "running" ? <span className="typing">● ● ●</span> : "")}</div>
+            <div className="messageText">{m.text ? <MarkdownText text={m.text} /> : (m.status === "running" ? <span className="typing">● ● ●</span> : "")}</div>
+            {m.role === "model" && active.envId && (m.status === "completed" || m.status === "incomplete") ? <div className="outputs">
+              <button className="outputBtn" onClick={() => loadOutputFiles(active.envId, m.id)} disabled={loadingOutputs[m.id]}>📦 {loadingOutputs[m.id] ? "Loading outputs…" : "Output files"}</button>
+              {outputFiles[m.id]?.length ? <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}><span title={f.path}>📄 {f.path.replace(/^workspace\/outputs\/?/, "")}</span><button onClick={() => downloadOutput(active.envId, f)}>Download</button></div>)}</div> : null}
+            </div> : null}
           </div>
         </article>)}</div>}
         {drag && <div className="dropOverlay">Drop files or a project here</div>}
@@ -202,6 +240,51 @@ export default function Home() {
       <div className="settingsFoot"><button className="danger" onClick={() => { setApiKey(""); localStorage.removeItem("gemini-max-api-key"); }}>Remove saved key</button><button className="primary" onClick={() => setSettings(false)}>Done</button></div>
     </section></div>}
   </div>;
+}
+
+function MarkdownText({ text }: { text: string }) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks: ReactNode[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim().startsWith("```")) {
+      const lang = line.trim().slice(3).trim();
+      const code: string[] = []; i++;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) { code.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      blocks.push(<pre className="mdCode" key={`code-${i}`}><code data-lang={lang}>{code.join("\n")}</code></pre>);
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) { const level = Math.min(6, heading[1].length); const H: any = `h${level}`; blocks.push(<H className="mdHeading" key={`h-${i}`}>{inlineMarkdown(heading[2])}</H>); i++; continue; }
+    if (/^[-*+]\s+/.test(line)) {
+      const items: string[] = []; while (i < lines.length && /^[-*+]\s+/.test(lines[i])) { items.push(lines[i].replace(/^[-*+]\s+/, "")); i++; }
+      blocks.push(<ul className="mdList" key={`ul-${i}`}>{items.map((x,j)=><li key={j}>{inlineMarkdown(x)}</li>)}</ul>); continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = []; while (i < lines.length && /^\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\d+\.\s+/, "")); i++; }
+      blocks.push(<ol className="mdList" key={`ol-${i}`}>{items.map((x,j)=><li key={j}>{inlineMarkdown(x)}</li>)}</ol>); continue;
+    }
+    if (!line.trim()) { i++; continue; }
+    const para: string[] = [line]; i++;
+    while (i < lines.length && lines[i].trim() && !lines[i].trim().startsWith("```") && !/^(#{1,6})\s+/.test(lines[i]) && !/^[-*+]\s+/.test(lines[i]) && !/^\d+\.\s+/.test(lines[i])) { para.push(lines[i]); i++; }
+    blocks.push(<p className="mdParagraph" key={`p-${i}`}>{inlineMarkdown(para.join("\n"))}</p>);
+  }
+  return <div className="markdown">{blocks}</div>;
+}
+
+function inlineMarkdown(value: string): ReactNode[] {
+  const parts = value.split(/(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|~~[^~]+~~)/g).filter(Boolean);
+  return parts.map((part, i) => {
+    if (part.startsWith("`") && part.endsWith("`")) return <code className="mdInlineCode" key={i}>{part.slice(1,-1)}</code>;
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={i}>{part.slice(2,-2)}</strong>;
+    if (part.startsWith("__") && part.endsWith("__")) return <strong key={i}>{part.slice(2,-2)}</strong>;
+    if (part.startsWith("~~") && part.endsWith("~~")) return <del key={i}>{part.slice(2,-2)}</del>;
+    if (part.startsWith("*") && part.endsWith("*")) return <em key={i}>{part.slice(1,-1)}</em>;
+    if (part.startsWith("_") && part.endsWith("_")) return <em key={i}>{part.slice(1,-1)}</em>;
+    return <span key={i}>{part}</span>;
+  });
 }
 
 function fileToBase64(file: File) { return new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(",")[1] || ""); r.onerror = reject; r.readAsDataURL(file); }); }
