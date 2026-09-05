@@ -1,6 +1,7 @@
 "use client";
 
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import JSZip from "jszip";
 
 type Activity = { kind: "command" | "activity" | "step"; label: string; type?: string; detail?: { command?: string; output?: string; file?: string; text?: string; raw?: string } };
 type Change = { file: string; additions: number; deletions: number };
@@ -36,6 +37,7 @@ export default function Home() {
   const [sidebar, setSidebar] = useState(true);
   const [outputFiles, setOutputFiles] = useState<Record<string, OutputFile[]>>({});
   const [loadingOutputs, setLoadingOutputs] = useState<Record<string, boolean>>({});
+  const [zipping, setZipping] = useState<Record<string, boolean>>({});
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const interactionRef = useRef("");
@@ -58,6 +60,13 @@ export default function Home() {
   useEffect(() => { localStorage.setItem("gemini-max-settings", JSON.stringify({ model, showThinking, background, autoRun, systemPrompt, maxTokens })); }, [model, showThinking, background, autoRun, systemPrompt, maxTokens]);
   useEffect(() => { if (chats.length) localStorage.setItem("gemini-max-chats", JSON.stringify(chats)); else localStorage.removeItem("gemini-max-chats"); }, [chats]);
 
+  // Make sure output-polling intervals never outlive the component (they previously
+  // kept running forever if the tab stayed open, since nothing cleared them on unmount).
+  useEffect(() => {
+    const pollers = outputPollRef.current;
+    return () => { Object.values(pollers).forEach(clearInterval); };
+  }, []);
+
   function createChat() {
     const id = crypto.randomUUID();
     const chat: Chat = { id, title: "New conversation", messages: [], envId: "", prevId: "", updated: Date.now() };
@@ -70,8 +79,9 @@ export default function Home() {
     Object.values(outputPollRef.current).forEach(clearInterval); outputPollRef.current = {};
     const id = interactionRef.current; abortRef.current?.abort(); if (id) { try { await fetch("/api/interaction/cancel", { method: "POST", headers: { "Content-Type": "application/json", "x-gemini-api-key": apiKey }, body: JSON.stringify({ id }) }); } catch {} } setBusy(false); setStatus("Stopped"); }
 
-  async function send() {
-    if (!prompt.trim() || !apiKey.trim() || busy) return;
+  async function send(override?: string) {
+    const text = (override ?? prompt).trim();
+    if (!text || !apiKey.trim() || busy) return;
     let chat = active;
     if (!chat) {
       const id = crypto.randomUUID();
@@ -81,7 +91,6 @@ export default function Home() {
     }
     setBusy(true); setStatus(background ? "Running in background…" : "Thinking…");
     const uploaded: Upload[] = await Promise.all(files.map(async f => ({ name: f.name, mimeType: f.type || "application/octet-stream", data: await fileToBase64(f) })));
-    const text = prompt.trim();
     const userMsg: Msg = { id: crypto.randomUUID(), role: "user", text, files: uploaded.map(f => f.name), time: Date.now() };
     const modelMsg: Msg = { id: crypto.randomUUID(), role: "model", text: "", thoughts: [], steps: [], time: Date.now(), status: "running" };
     const title = chat.messages.length === 0 ? text.slice(0, 48) + (text.length > 48 ? "…" : "") : chat.title;
@@ -281,6 +290,46 @@ export default function Home() {
   }
   function exportChat() { if (!active) return; downloadBlob(JSON.stringify(active, null, 2), `${slug(active.title)}.json`, "application/json"); }
 
+  async function downloadAllOutputs(envId: string, messageId: string) {
+    const list = outputFiles[messageId] || [];
+    if (!envId || !list.length) return;
+    setZipping(v => ({ ...v, [messageId]: true }));
+    setStatus("Zipping outputs…");
+    try {
+      const zip = new JSZip();
+      const usedNames = new Set<string>();
+      for (const file of list) {
+        const res = await fetch(`/api/environment/file?environmentId=${encodeURIComponent(envId)}&path=${encodeURIComponent(file.path)}`, { headers: { "x-gemini-api-key": apiKey } });
+        if (!res.ok) throw new Error(`Failed to fetch ${file.name || file.path}`);
+        const buf = await res.arrayBuffer();
+        let name = file.name || file.path.split("/").pop() || "file";
+        // Avoid collisions if two output files share a cleaned-up name.
+        if (usedNames.has(name)) {
+          const dot = name.lastIndexOf(".");
+          const base = dot > 0 ? name.slice(0, dot) : name;
+          const ext = dot > 0 ? name.slice(dot) : "";
+          let i = 2;
+          while (usedNames.has(`${base} (${i})${ext}`)) i++;
+          name = `${base} (${i})${ext}`;
+        }
+        usedNames.add(name);
+        zip.file(name, buf);
+      }
+      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${slug(active?.title || "gemini-outputs")}-outputs.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      setStatus("Ready");
+    } catch (e: any) {
+      setStatus(`Zip download failed: ${e?.message || "error"}`);
+    } finally {
+      setZipping(v => ({ ...v, [messageId]: false }));
+    }
+  }
+
   return <div className="app">
     <aside className={sidebar ? "sidebar" : "sidebar collapsed"}>
       <div className="sideTop"><button className="iconBtn" onClick={() => setSidebar(!sidebar)} aria-label="Toggle sidebar">☰</button>{sidebar && <span className="brandMini">Gemini</span>}</div>
@@ -309,19 +358,22 @@ export default function Home() {
             {m.role === "model" && m.changes?.length ? <details className="changes" open><summary>Changes · {m.changes.length} files</summary>{m.changes.map((c,i) => <div className="changeRow" key={`${c.file}-${i}`}><span className="changeFile" title={c.file}>{c.file}</span><span className="changeAdd">+{c.additions}</span><span className="changeDel">-{c.deletions}</span></div>)}</details> : null}
             <div className="messageText">{m.text ? <MarkdownText text={m.text} /> : (m.status === "running" ? <span className="typing">● ● ●</span> : "")}</div>
             {m.role === "model" && outputFiles[m.id]?.length ? <div className="outputs">
-              <div className="outputsTitle">Output</div>
+              <div className="outputsHeader"><div className="outputsTitle">Output · {outputFiles[m.id].length} file{outputFiles[m.id].length === 1 ? "" : "s"}</div>
+                {outputFiles[m.id].length > 1 && <button className="downloadAllOutput" disabled={!!zipping[m.id]} onClick={() => downloadAllOutputs(active.envId || "", m.id)}>{zipping[m.id] ? "Zipping…" : "⇩ Download all (.zip)"}</button>}
+              </div>
               <div className="outputList">{outputFiles[m.id].map(f => <div className="outputFile" key={f.path}>
                 <div className="outputMeta"><span className="outputName" title={f.path}>{f.name}</span><span className="outputType">{fileTypeLabel(f)}</span></div>
                 <button className="downloadOutput" onClick={() => downloadOutput(active.envId || "", f)}>Download</button>
               </div>)}</div>
             </div> : null}
+            {m.role === "model" && m.status === "incomplete" ? <button className="continueBtn" disabled={busy} onClick={() => void send("Continue")}>↻ Continue</button> : null}
           </div>
         </article>)}</div>}
         {drag && <div className="dropOverlay">Drop files or a project here</div>}
       </section>
 
       <section className="composerWrap"><div className="composer"><div className="composerTop">{files.map((f,i) => <span className="attachment" key={`${f.name}-${i}`}>📎 {f.name}<button onClick={() => setFiles(x => x.filter((_,j) => j !== i))}>×</button></span>)}</div><textarea value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Message Gemini…" rows={1} />
-        <div className="composerBar"><div className="leftTools"><input ref={inputRef} hidden type="file" multiple onChange={e => { if (e.target.files) addFiles(e.target.files); e.currentTarget.value = ""; }} /><button className="toolBtn" onClick={() => inputRef.current?.click()}>＋</button><span className="toolLabel">Attach</span><button className={showThinking ? "toolBtn on" : "toolBtn"} onClick={() => setShowThinking(v => !v)} title="Show thinking summaries">✦</button><button className={background ? "toolBtn on" : "toolBtn"} onClick={() => setBackground(v => !v)} title="Background execution">◷</button></div><div className="sendArea"><span className="statusText">{status}</span>{busy ? <button className="stopBtn" onClick={stop}>■ Stop</button> : <button className="sendBtn" disabled={!apiKey || !prompt.trim()} onClick={send}>↑</button>}</div></div>
+        <div className="composerBar"><div className="leftTools"><input ref={inputRef} hidden type="file" multiple onChange={e => { if (e.target.files) addFiles(e.target.files); e.currentTarget.value = ""; }} /><button className="toolBtn" onClick={() => inputRef.current?.click()}>＋</button><span className="toolLabel">Attach</span><button className={showThinking ? "toolBtn on" : "toolBtn"} onClick={() => setShowThinking(v => !v)} title="Show thinking summaries">✦</button><button className={background ? "toolBtn on" : "toolBtn"} onClick={() => setBackground(v => !v)} title="Background execution">◷</button></div><div className="sendArea"><span className="statusText">{status}</span>{busy ? <button className="stopBtn" onClick={stop}>■ Stop</button> : <button className="sendBtn" disabled={!apiKey || !prompt.trim()} onClick={() => send()}>↑</button>}</div></div>
       </div><div className="disclaimer">Gemini can make mistakes. Review code and commands before using them in production.</div></section>
     </main>
 
@@ -400,11 +452,12 @@ function fileTypeLabel(file: OutputFile) {
 
 function parseChanges(output: string): Change[] {
   const result: Change[] = [];
-  const lines = output.replace(/\\r/g, "").split("\n");
+  const lines = output.replace(/\r/g, "").split("\n");
   for (const line of lines) {
-    const m = line.match(/^\\s*(\\d+)\\s+(\\d+)\\s+(.+?)\\s*$/);
-    if (m && !/^\\d+\\s+\\d+\\s+\\d+$/.test(line.trim())) result.push({ file: m[3], additions: Number(m[1]), deletions: Number(m[2]) });
-    const marker = line.match(/GEMINI_CHANGE\\|(.+?)\\|\\+(\\d+)\\|\\-(\\d+)/);
+    // git diff --numstat output: "<additions>\t<deletions>\t<path>" (binary files use "-\t-\t<path>")
+    const m = line.match(/^\s*(\d+|-)\s+(\d+|-)\s+(.+?)\s*$/);
+    if (m) result.push({ file: m[3], additions: m[1] === "-" ? 0 : Number(m[1]), deletions: m[2] === "-" ? 0 : Number(m[2]) });
+    const marker = line.match(/GEMINI_CHANGE\|(.+?)\|\+(\d+)\|-(\d+)/);
     if (marker) result.push({ file: marker[1], additions: Number(marker[2]), deletions: Number(marker[3]) });
   }
   return result;
