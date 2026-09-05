@@ -1,47 +1,28 @@
-# Gemini Terminal UI
+# Gemini Terminal UI — Vercel ready
 
-A Vercel-ready Next.js interface that gives you a terminal-style Gemini experience in the browser.
+A terminal-style Gemini web UI using the current Google GenAI JavaScript SDK and Interactions API.
 
-## What it includes
+## Fixed file handling
 
-- Paste a Google AI Studio / Gemini API key.
-- Terminal-style chat interface.
-- Streaming model output.
-- Conversation context.
-- Multiple file attachments.
-- Multimodal image/audio/video/PDF input.
-- Model selector.
-- Mobile-friendly UI.
-- Server-side Gemini requests so the key is not sent directly to Google from the browser.
-- Vercel Node.js runtime.
+- Text/Markdown/code files are decoded and sent as actual text content.
+- PDF files use the current `document` input type.
+- Images, audio and video use their corresponding multimodal input types.
+- ZIP project uploads are unpacked server-side and supported source/text files are provided to Gemini with filenames.
+- Streaming uses the current `step.delta` event format.
 
-## Run locally
+## Run
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open http://localhost:3000.
+## Vercel
 
-## Deploy to Vercel
+Import the repository into Vercel and deploy. You can optionally set `GEMINI_API_KEY` as a Vercel environment variable.
 
-Push this folder to GitHub and import the repository into Vercel.
+## Important
 
-Optional production setup:
+A Vercel serverless function is not a persistent local terminal. It cannot safely expose arbitrary shell access to the Vercel host. This UI handles Gemini model interactions and uploaded project context. A full coding-agent terminal requires a sandbox/managed-agent backend.
 
-```text
-GEMINI_API_KEY=your_key_here
-```
-
-If `GEMINI_API_KEY` is present, the API route can use it. The UI can also send a session key through the `x-gemini-api-key` request header.
-
-## Important limitation
-
-A browser UI on Vercel cannot literally reproduce every local-terminal capability. A local CLI can access your machine's filesystem, shell, installed programs, git credentials, and unrestricted local processes. Vercel serverless functions do not provide that same persistent local machine.
-
-For a true coding-agent/terminal replacement, add a sandbox/agent backend. Gemini's newer Interactions API supports managed remote agent environments; that is the appropriate architecture for shell/file operations without giving a web request arbitrary access to the Vercel host.
-
-## Security
-
-Do not commit API keys. If you pasted a real key into a public chat or repository, revoke/rotate it in Google AI Studio and create a new one.
+Never commit API keys. If a real key was exposed publicly, rotate it in Google AI Studio.
